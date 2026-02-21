@@ -1,0 +1,404 @@
+## 1.1 设置工作目录（注意用 / 或者 \\）
+setwd("C:/Users/13918/Desktop/BMCPharmacology/BULK")
+
+## 1.2 确认当前工作目录
+getwd()
+
+## 3.1 表达矩阵基本信息
+class(normExpr.reg)
+dim(normExpr.reg)         # 行数、列数
+head(colnames(normExpr.reg))   # 前几个样本名
+head(rownames(normExpr.reg))   # 前几个行名（看看是不是基因符号）
+
+## 看一点表达值
+normExpr.reg[1:5, 1:5]
+
+## 3.2 样本信息基本情况
+class(targets)
+dim(targets)
+colnames(targets)[1:20]   # 先看前 20 列的列名
+head(targets[, 1:6])      # 前几列内容
+
+## 如果行名是样本名，确认和表达矩阵列名一致
+all(colnames(normExpr.reg) %in% rownames(targets))
+
+
+## 4.1 用 SampleID 作为行名
+rownames(targets) <- targets$SampleID
+
+## 4.2 看看现在是否能对应上
+all(colnames(normExpr.reg) %in% rownames(targets))
+
+## 4.3 按照表达矩阵列顺序重排 targets
+targets <- targets[colnames(normExpr.reg), ]
+
+## 4.4 再确认顺序一一对应
+all(rownames(targets) == colnames(normExpr.reg))
+
+
+genes.symbol <- c(
+  "DRD2","LYN","NFE2L2","CDK2","NR3C1","PIK3CA","CTSB",
+  "LCK","BRAF","MAPK8","MMP9","GSK3B","PIK3CD","CSF1R",
+  "FYN","PTGS2","SMAD3","NFKB1","MAP2K1","HDAC1","KIT",
+  "ABL1","MAPK14"
+)
+
+## 5.1 看看这些基因名有没有直接出现在表达矩阵的行名里
+sum(genes.symbol %in% rownames(normExpr.reg))
+
+
+
+## 6.1 安装 BiocManager（如果还没有）
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+## 6.2 安装并载入 org.Hs.eg.db（如果未安装）
+if (!requireNamespace("org.Hs.eg.db", quietly = TRUE)) {
+  BiocManager::install("org.Hs.eg.db")
+}
+
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+
+## 6.3 基因符号 -> Ensembl ID
+map <- AnnotationDbi::select(org.Hs.eg.db,
+                             keys    = genes.symbol,
+                             columns = c("ENSEMBL", "SYMBOL"),
+                             keytype = "SYMBOL")
+
+map   # 看一下映射结果
+
+## 6.4 去掉没有 Ensembl ID 的行
+map <- map[!is.na(map$ENSEMBL), ]
+
+## 6.5 如果有重复的 ENSG，只保留一个（最简单处理）
+map <- map[!duplicated(map$ENSEMBL), ]
+
+## 6.6 提取 Ensembl ID，并把名字设成对应的基因符号，便于后面重命名
+ens.ids <- map$ENSEMBL
+names(ens.ids) <- map$SYMBOL
+
+ens.ids
+
+## 7.1 只保留在表达矩阵中能找到的那些 Ensembl ID
+genes.in.expr <- ens.ids[ens.ids %in% rownames(normExpr.reg)]
+
+length(genes.in.expr)   # 实际能找到多少个基因
+genes.in.expr
+
+## 7.2 提取对应的表达矩阵
+expr.23 <- normExpr.reg[genes.in.expr, ]
+
+dim(expr.23)
+head(expr.23[, 1:5])
+
+## 7.3 把行名从 ENSG 换成更直观的基因符号
+rownames(expr.23) <- names(genes.in.expr)
+head(expr.23[, 1:5])
+
+## 8.1 查看分组情况（以 Diagnosis 为例）
+table(targets$Diagnosis)
+
+## 8.2 准备样本分组注释
+annotation_col <- data.frame(
+  Diagnosis = targets$Diagnosis
+)
+rownames(annotation_col) <- rownames(targets)   # 也就是样本名
+
+## 8.3 设置你指定的 4 种颜色
+my.colors <- c("#d25756", "#f1cb6e", "#7eb4db", "#b889b9")
+
+## 8.4 不同 Diagnosis 水平数量
+diag.levels <- sort(unique(as.character(targets$Diagnosis)))
+
+## 给每个 Diagnosis 分配一个颜色（如果分组少于 4 个，只用前几个颜色）
+ann_colors <- list(
+  Diagnosis = setNames(my.colors[1:length(diag.levels)], diag.levels)
+)
+
+## 8.5 画热图
+if (!requireNamespace("pheatmap", quietly = TRUE)) {
+  install.packages("pheatmap")
+}
+library(pheatmap)
+
+pheatmap(expr.23,
+         scale              = "row",   # 每个基因在行内标准化，更易比较
+         show_colnames      = FALSE,
+         annotation_col     = annotation_col,
+         annotation_colors  = ann_colors,
+         clustering_method  = "complete",
+         main               = "Expression of 23 target genes")
+
+
+
+
+
+
+## 一步完成：23 个基因的箱线图 + 显著性星号
+## 运行前保证：normExpr.reg、targets 已在环境中
+
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+library(reshape2)
+library(dplyr)
+library(ggplot2)
+
+{
+  ## 1. 目标基因、分组变量、颜色 ------------------------
+  genes.symbol <- c(
+    "DRD2","LYN","NFE2L2","CDK2","NR3C1","PIK3CA","CTSB",
+    "LCK","BRAF","MAPK8","MMP9","GSK3B","PIK3CD","CSF1R",
+    "FYN","PTGS2","SMAD3","NFKB1","MAP2K1","HDAC1","KIT",
+    "ABL1","MAPK14"
+  )
+  group.var <- "Diagnosis"              # 想按别的变量分组，改这里
+  my.colors <- c("#d25756", "#f1cb6e", "#7eb4db", "#b889b9")
+  
+  ## 2. 对齐样本信息 ------------------------------------
+  rownames(targets) <- targets$SampleID
+  targets <- targets[colnames(normExpr.reg), ]
+  stopifnot(all(rownames(targets) == colnames(normExpr.reg)))
+  
+  ## 3. 基因注释：符号 -> Ensembl，并与表达矩阵匹配 -----
+  map <- AnnotationDbi::select(
+    org.Hs.eg.db,
+    keys    = genes.symbol,
+    columns = c("ENSEMBL", "SYMBOL"),
+    keytype = "SYMBOL"
+  )
+  ## 去掉 NA，并按 Ensembl 去重（1:many 映射里只保留一个）
+  map <- map[!is.na(map$ENSEMBL), ]
+  map <- map[!duplicated(map$ENSEMBL), ]
+  
+  ens.ids <- map$ENSEMBL
+  names(ens.ids) <- map$SYMBOL
+  
+  genes.in.expr <- ens.ids[ens.ids %in% rownames(normExpr.reg)]
+  if (length(genes.in.expr) == 0) stop("23 个基因中，没有任何基因在表达矩阵中找到。")
+  
+  expr.23 <- normExpr.reg[genes.in.expr, ]
+  rownames(expr.23) <- names(genes.in.expr)
+  
+  ## 4. 宽表 -> 长表，并合并分组信息 --------------------
+  expr.long <- melt(as.matrix(expr.23))
+  colnames(expr.long) <- c("Gene", "Sample", "Expression")
+  
+  sample.info <- data.frame(
+    Sample = rownames(targets),
+    Group  = targets[[group.var]],
+    stringsAsFactors = FALSE
+  )
+  expr.long <- left_join(expr.long, sample.info, by = "Sample")
+  
+  ## 5. 设置分组为因子 + 颜色 ---------------------------
+  group.levels <- sort(unique(as.character(expr.long$Group)))
+  expr.long$Group <- factor(expr.long$Group, levels = group.levels)
+  
+  if (length(group.levels) > length(my.colors)) {
+    warning("分组水平多于 4 个，只为前 4 个指定颜色。")
+  }
+  group.colors <- setNames(my.colors[1:length(group.levels)], group.levels)
+  
+  ## 6. 为每个基因计算整体检验的 p 值，并转换成星号 -----
+  p_to_star <- function(p) {
+    if (is.na(p)) return("")
+    if (p < 0.0001) "****"
+    else if (p < 0.001) "***"
+    else if (p < 0.01) "**"
+    else if (p < 0.05) "*"
+    else "ns"
+  }
+  
+  stat.df <- expr.long %>%
+    group_by(Gene) %>%
+    summarise(
+      p.value = {
+        dat <- cur_data()
+        k <- dplyr::n_distinct(dat$Group)
+        if (k < 2) {
+          NA_real_
+        } else if (k > 2) {
+          kruskal.test(Expression ~ Group, data = dat)$p.value
+        } else {
+          wilcox.test(Expression ~ Group, data = dat)$p.value
+        }
+      },
+      ## 星号的 y 位置设在当前基因表达最大值的 1.05 倍
+      y.position = max(Expression, na.rm = TRUE) * 1.05,
+      ## x 位置放在各组中间
+      x.position = (dplyr::n_distinct(Group) + 1) / 2,
+      .groups = "drop"
+    ) %>%
+    mutate(
+      p.adj  = p.adjust(p.value, method = "BH"),   # 可选：跨基因校正
+      label  = vapply(p.adj, p_to_star, character(1))  # 用校正后的 p 值标星
+    )
+  
+  ## 7. 画箱线图 + 星号 ---------------------------------
+  p <- ggplot(expr.long, aes(x = Group, y = Expression, fill = Group)) +
+    geom_boxplot(outlier.size = 0.5) +
+    geom_jitter(size = 0.5, width = 0.2, alpha = 0.5) +
+    facet_wrap(~ Gene, scales = "free_y", ncol = 4) +
+    scale_fill_manual(values = group.colors) +
+    theme_bw() +
+    theme(
+      axis.text.x  = element_text(angle = 45, hjust = 1),
+      strip.text   = element_text(size = 8),
+      legend.position = "right",
+      plot.margin = margin(5.5, 20, 5.5, 5.5)     # 右边留点空，防止星号被裁掉
+    ) +
+    labs(
+      x = group.var,
+      y = "Expression",
+      fill = group.var,
+      title = paste("Expression of 23 target genes by", group.var)
+    ) +
+    ## 把星号加到每个基因对应的 facet 上
+    geom_text(
+      data = stat.df,
+      aes(x = x.position, y = y.position, label = label),
+      inherit.aes = FALSE,
+      size = 4
+    ) +
+    coord_cartesian(clip = "off")   # 防止文字被图框裁掉
+  
+  print(p)
+}
+
+
+
+
+## 差异表达分析 + 火山图
+## 运行前：normExpr.reg（18849×90）、targets 已在环境中
+
+library(limma)
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+library(ggplot2)
+library(dplyr)
+library(ggrepel)
+
+{
+  ## 1. 对齐样本信息 -------------------------------------------------
+  rownames(targets) <- targets$SampleID
+  targets <- targets[colnames(normExpr.reg), ]
+  stopifnot(all(rownames(targets) == colnames(normExpr.reg)))
+  
+  ## 2. 选择分组变量和要比较的两组 -------------------------------
+  group.var <- "Diagnosis"      # 这里按 Diagnosis 分组；想用其它如 Region 就改成 "Region"
+  
+  ## 看一下这个变量的取值（请先单独运行这两行看结果）：
+  print(table(targets[[group.var]]))
+  
+  ## 手动把下面两个名称改成你要比较的两组名称，比如：
+  ## grp1 <- "Control"; grp2 <- "AD"
+  grp1 <- "Control"   # 修改为实际的“对照/参考”组名
+  grp2 <- "AD"        # 修改为实际的“病例/处理”组名
+  
+  group.all <- factor(targets[[group.var]])
+  keep.samples <- group.all %in% c(grp1, grp2)
+  
+  expr.use  <- as.matrix(normExpr.reg[, keep.samples])
+  group     <- droplevels(group.all[keep.samples])
+  targets.use <- targets[keep.samples, ]
+  
+  if (length(levels(group)) != 2) {
+    stop("请确认 grp1 和 grp2 与 table(targets[[group.var]]) 中的水平一致，并且只保留两组。")
+  }
+  
+  cat("差异分析对比：", grp2, "vs", grp1, "\n")
+  cat("样本数：", table(group), "\n")
+  
+  ## 3. limma 差异分析 ---------------------------------------------
+  design <- model.matrix(~ 0 + group)
+  colnames(design) <- levels(group)
+  
+  contrast.matrix <- makeContrasts(
+    contrasts = paste0(grp2, "-", grp1), 
+    levels = design
+  )
+  
+  fit  <- lmFit(expr.use, design)
+  fit2 <- contrasts.fit(fit, contrast.matrix)
+  fit2 <- eBayes(fit2)
+  
+  deg <- topTable(fit2, coef = 1, number = Inf, sort.by = "P")
+  
+  ## 4. 给差异结果加上基因符号（从 Ensembl 转 SYMBOL） ------------
+  ens.ids <- rownames(deg)
+  
+  ann <- AnnotationDbi::select(
+    org.Hs.eg.db,
+    keys    = ens.ids,
+    keytype = "ENSEMBL",
+    columns = c("SYMBOL")
+  )
+  ## 处理 1:many 的情况：每个 ENSG 只保留第一行
+  ann <- ann[!duplicated(ann$ENSEMBL), ]
+  rownames(ann) <- ann$ENSEMBL
+  
+  deg$ENSEMBL <- rownames(deg)
+  deg$SYMBOL  <- ann[deg$ENSEMBL, "SYMBOL"]
+  deg$SYMBOL[is.na(deg$SYMBOL)] <- deg$ENSEMBL   # 没有符号的用 ENSG 代替
+  
+  ## 5. 按常规阈值标记上/下调基因 -------------------------------
+  logFC.cutoff <- 1
+  adjP.cutoff  <- 0.05
+  
+  deg$regulation <- "NotSig"
+  deg$regulation[deg$logFC >=  logFC.cutoff & deg$adj.P.Val < adjP.cutoff] <- "Up"
+  deg$regulation[deg$logFC <= -logFC.cutoff & deg$adj.P.Val < adjP.cutoff] <- "Down"
+  
+  ## 6. 准备火山图数据 -------------------------------------------
+  deg$negLog10AdjP <- -log10(deg$adj.P.Val)
+  
+  ## 颜色：用你给的调色板
+  col.up   <- "#d25756"  # 上调
+  col.down <- "#7eb4db"  # 下调
+  col.ns   <- "grey80"   # 不显著
+  
+  ## 选一些基因做标签（例如按 adj.P.Val 最小的前 15 个）
+  topN <- 15
+  label.genes <- deg %>%
+    arrange(adj.P.Val) %>%
+    head(topN) %>%
+    pull(SYMBOL)
+  
+  deg$label <- ifelse(deg$SYMBOL %in% label.genes, deg$SYMBOL, "")
+  
+  ## 7. 绘制火山图 -----------------------------------------------
+  p.volcano <- ggplot(deg, aes(x = logFC, y = negLog10AdjP)) +
+    geom_point(aes(color = regulation), alpha = 0.8, size = 1.2) +
+    scale_color_manual(
+      values = c(
+        "Up"    = col.up,
+        "Down"  = col.down,
+        "NotSig" = col.ns
+      )
+    ) +
+    geom_vline(xintercept =  c(-logFC.cutoff, logFC.cutoff),
+               linetype = "dashed", color = "black") +
+    geom_hline(yintercept = -log10(adjP.cutoff),
+               linetype = "dashed", color = "black") +
+    geom_text_repel(
+      data = subset(deg, label != ""),
+      aes(label = label),
+      size = 3,
+      max.overlaps = 50
+    ) +
+    theme_bw() +
+    labs(
+      title = paste0("Volcano plot: ", grp2, " vs ", grp1),
+      x = "log2 Fold Change",
+      y = "-log10(adj P-value)",
+      color = "Regulation"
+    )
+  
+  print(p.volcano)
+  
+  ## 8. 可选：把差异分析结果保存到文件 ---------------------------
+  # write.csv(deg, file = "DEG_limma_results.csv", row.names = FALSE)
+}
+
