@@ -1,0 +1,1004 @@
+# 1. 设置工作目录 (可选)
+setwd("C:/Users/13918/Desktop/BMCPharmacology/BULK")
+
+# 2. 定义文件名
+file_path <- "GSE159699_summary_count.star.txt.gz"
+
+# 3. 读取数据
+# 注意：如果是基因表达矩阵，通常第一列是基因名，有列名，且是制表符分隔
+data <- read.table(file_path, header = TRUE, sep = "\t", check.names = FALSE)
+
+# 4. 查看数据前几行
+head(data)
+
+# 安装并加载必要的包
+if (!require("GEOquery")) BiocManager::install("GEOquery")
+library(GEOquery)
+
+# 获取GSE159699的详细信息
+gse <- getGEO("GSE159699", GSEMatrix = TRUE)
+
+# 查看数据集的基本信息
+gse_info <- gse[[1]]
+
+# 查看样本信息
+pData(gse_info)
+
+# 查看实验设计信息
+experimentData(gse_info)
+
+# 提取表型数据（样本分组信息）
+pheno_data <- pData(gse_info)
+head(pheno_data)
+
+# 查看关键列
+colnames(pheno_data)
+
+# 查看数据结构
+dim(data)  # 查看行数和列数
+str(data)  # 查看数据结构
+
+# 查看样本名称
+sample_names <- colnames(data)[-1]  # 排除第一列基因名
+print(sample_names)
+
+# 从样本名称推断分组信息
+# 样本名称格式：编号-样本ID-分组
+# AD: 阿尔茨海默病
+# Old: 老年对照
+# Young: 年轻对照
+
+# 提取分组信息
+group <- sapply(strsplit(sample_names, "-"), function(x) x[3])
+table(group)
+
+# 创建样本信息表
+sample_info <- data.frame(
+  SampleID = sample_names,
+  Group = group,
+  row.names = sample_names
+)
+
+print(sample_info)
+
+
+# ====== 1. 数据预处理 ======
+
+# 设置工作目录（可选）
+setwd("C:/Users/13918/Desktop/BMCPharmacology/BULK")
+
+# 将第一列（基因名）设为行名
+rownames(data) <- data$refGene
+count_matrix <- data[, -1]  # 移除基因名列
+count_matrix <- as.matrix(count_matrix)  # 转换为数值矩阵
+
+# 查看数据基本信息
+cat("原始数据维度:\n")
+dim(count_matrix)
+cat("\n前5行前5列:\n")
+count_matrix[1:5, 1:5]
+
+# 检查数据质量
+cat("\n数据摘要统计:\n")
+summary(colSums(count_matrix))  # 每个样本的总reads数
+
+# 检查缺失值
+cat("\n缺失值数量:", sum(is.na(count_matrix)), "\n")
+
+# 过滤低表达基因（至少在3个样本中count > 10）
+keep <- rowSums(count_matrix > 10) >= 3
+count_filtered <- count_matrix[keep, ]
+
+cat("\n过滤前基因数:", nrow(count_matrix))
+cat("\n过滤后基因数:", nrow(count_filtered))
+cat("\n过滤掉的基因数:", nrow(count_matrix) - nrow(count_filtered), "\n")
+
+
+
+# ====== 2. 样本质量控制 ======
+
+# 加载必要的包
+library(ggplot2)
+library(reshape2)
+
+# 2.1 每个样本的总reads数
+total_counts <- colSums(count_filtered)
+count_df <- data.frame(
+  Sample = names(total_counts),
+  TotalCounts = total_counts,
+  Group = sample_info$Group
+)
+
+# 绘制总reads数柱状图
+p1 <- ggplot(count_df, aes(x = reorder(Sample, TotalCounts), 
+                           y = TotalCounts/1e6, 
+                           fill = Group)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Total Read Counts per Sample",
+       x = "Sample",
+       y = "Total Counts (Million)") +
+  theme_bw() +
+  theme(axis.text.y = element_text(size = 8))
+
+print(p1)
+
+# 2.2 样本间相关性分析
+cor_matrix <- cor(count_filtered, method = "spearman")
+
+# 安装和加载pheatmap
+if (!require("pheatmap")) install.packages("pheatmap")
+library(pheatmap)
+
+# 绘制相关性热图
+pheatmap(cor_matrix,
+         annotation_col = data.frame(Group = sample_info$Group, 
+                                     row.names = rownames(sample_info)),
+         annotation_row = data.frame(Group = sample_info$Group, 
+                                     row.names = rownames(sample_info)),
+         main = "Sample Correlation Heatmap (Spearman)",
+         show_rownames = TRUE,
+         show_colnames = TRUE,
+         fontsize_row = 8,
+         fontsize_col = 8)
+
+
+# ====== 3. 数据标准化和PCA ======
+
+# 加载DESeq2
+if (!require("DESeq2")) {
+  if (!require("BiocManager")) install.packages("BiocManager")
+  BiocManager::install("DESeq2")
+}
+library(DESeq2)
+
+# 确保sample_info的行名与count_filtered的列名匹配
+sample_info <- sample_info[colnames(count_filtered), ]
+
+# 设置分组的因子水平（Young作为对照）
+sample_info$Group <- factor(sample_info$Group, 
+                            levels = c("Young", "Old", "AD"))
+
+# 创建DESeq2数据对象
+dds <- DESeqDataSetFromMatrix(
+  countData = count_filtered,
+  colData = sample_info,
+  design = ~ Group
+)
+
+# 数据标准化（VST转换，适合可视化）
+vsd <- vst(dds, blind = FALSE)
+
+# PCA分析
+pcaData <- plotPCA(vsd, intgroup = "Group", returnData = TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+# 绘制PCA图
+p2 <- ggplot(pcaData, aes(PC1, PC2, color = Group, label = name)) +
+  geom_point(size = 3) +
+  geom_text(hjust = 0.5, vjust = -0.5, size = 3) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  ggtitle("PCA Plot - All Groups") +
+  theme_bw() +
+  theme(legend.position = "right")
+
+print(p2)
+
+# 保存PCA数据
+write.csv(pcaData, "PCA_results.csv", row.names = FALSE)
+
+
+
+# ====== 4. 差异表达分析 ======
+
+# 运行DESeq2差异分析
+dds <- DESeq(dds)
+
+# 查看可用的比较组合
+resultsNames(dds)
+
+# ===== 4.1 AD vs Young =====
+cat("\n========== AD vs Young ==========\n")
+res_AD_vs_Young <- results(dds, contrast = c("Group", "AD", "Young"))
+summary(res_AD_vs_Young)
+
+# 提取显著差异基因 (padj < 0.05, |log2FC| > 1)
+sig_AD_Young <- subset(res_AD_vs_Young, padj < 0.05 & abs(log2FoldChange) > 1)
+cat("\nAD vs Young 显著差异基因数 (padj<0.05, |FC|>2):", nrow(sig_AD_Young), "\n")
+
+# 上调和下调基因
+up_AD_Young <- subset(sig_AD_Young, log2FoldChange > 1)
+down_AD_Young <- subset(sig_AD_Young, log2FoldChange < -1)
+cat("  上调:", nrow(up_AD_Young), "个\n")
+cat("  下调:", nrow(down_AD_Young), "个\n")
+
+
+# ===== 4.2 AD vs Old =====
+cat("\n========== AD vs Old ==========\n")
+res_AD_vs_Old <- results(dds, contrast = c("Group", "AD", "Old"))
+summary(res_AD_vs_Old)
+
+sig_AD_Old <- subset(res_AD_vs_Old, padj < 0.05 & abs(log2FoldChange) > 1)
+cat("\nAD vs Old 显著差异基因数 (padj<0.05, |FC|>2):", nrow(sig_AD_Old), "\n")
+
+up_AD_Old <- subset(sig_AD_Old, log2FoldChange > 1)
+down_AD_Old <- subset(sig_AD_Old, log2FoldChange < -1)
+cat("  上调:", nrow(up_AD_Old), "个\n")
+cat("  下调:", nrow(down_AD_Old), "个\n")
+
+
+# ===== 4.3 Old vs Young =====
+cat("\n========== Old vs Young ==========\n")
+res_Old_vs_Young <- results(dds, contrast = c("Group", "Old", "Young"))
+summary(res_Old_vs_Young)
+
+sig_Old_Young <- subset(res_Old_vs_Young, padj < 0.05 & abs(log2FoldChange) > 1)
+cat("\nOld vs Young 显著差异基因数 (padj<0.05, |FC|>2):", nrow(sig_Old_Young), "\n")
+
+up_Old_Young <- subset(sig_Old_Young, log2FoldChange > 1)
+down_Old_Young <- subset(sig_Old_Young, log2FoldChange < -1)
+cat("  上调:", nrow(up_Old_Young), "个\n")
+cat("  下调:", nrow(down_Old_Young), "个\n")
+
+
+# ===== 4.4 保存所有差异分析结果 =====
+write.csv(as.data.frame(res_AD_vs_Young), "DEG_AD_vs_Young_all.csv")
+write.csv(as.data.frame(sig_AD_Young), "DEG_AD_vs_Young_sig.csv")
+
+write.csv(as.data.frame(res_AD_vs_Old), "DEG_AD_vs_Old_all.csv")
+write.csv(as.data.frame(sig_AD_Old), "DEG_AD_vs_Old_sig.csv")
+
+write.csv(as.data.frame(res_Old_vs_Young), "DEG_Old_vs_Young_all.csv")
+write.csv(as.data.frame(sig_Old_Young), "DEG_Old_vs_Young_sig.csv")
+
+cat("\n所有差异分析结果已保存！\n")
+
+
+
+
+
+# ====== 5. 差异基因可视化 ======
+
+library(ggplot2)
+library(EnhancedVolcano)  # 需要安装
+
+# 如果没有EnhancedVolcano，先安装
+if (!require("EnhancedVolcano")) {
+  BiocManager::install("EnhancedVolcano")
+}
+library(EnhancedVolcano)
+
+# 5.1 火山图 - AD vs Young
+p_volcano1 <- EnhancedVolcano(res_AD_vs_Young,
+                              lab = rownames(res_AD_vs_Young),
+                              x = 'log2FoldChange',
+                              y = 'padj',
+                              title = 'AD vs Young',
+                              pCutoff = 0.05,
+                              FCcutoff = 1,
+                              pointSize = 2.0,
+                              labSize = 4.0,
+                              col = c('grey30', 'forestgreen', 'royalblue', 'red2'),
+                              colAlpha = 0.5,
+                              legendPosition = 'right',
+                              legendLabSize = 12,
+                              legendIconSize = 4.0)
+
+print(p_volcano1)
+ggsave("Volcano_AD_vs_Young.png", width = 10, height = 8, dpi = 300)
+
+
+# 5.2 火山图 - AD vs Old
+p_volcano2 <- EnhancedVolcano(res_AD_vs_Old,
+                              lab = rownames(res_AD_vs_Old),
+                              x = 'log2FoldChange',
+                              y = 'padj',
+                              title = 'AD vs Old',
+                              pCutoff = 0.05,
+                              FCcutoff = 1,
+                              pointSize = 2.0,
+                              labSize = 4.0,
+                              col = c('grey30', 'forestgreen', 'royalblue', 'red2'),
+                              colAlpha = 0.5,
+                              legendPosition = 'right')
+
+print(p_volcano2)
+ggsave("Volcano_AD_vs_Old.png", width = 10, height = 8, dpi = 300)
+
+
+# 5.3 MA图
+par(mfrow = c(1, 3))
+plotMA(res_AD_vs_Young, main = "AD vs Young", ylim = c(-5, 5))
+plotMA(res_AD_vs_Old, main = "AD vs Old", ylim = c(-5, 5))
+plotMA(res_Old_vs_Young, main = "Old vs Young", ylim = c(-5, 5))
+dev.off()
+
+
+
+
+# ====== 6. 热图展示差异基因 ======
+
+# 6.1 提取AD vs Young的top50差异基因
+top50_AD_Young <- head(rownames(sig_AD_Young[order(sig_AD_Young$padj), ]), 50)
+
+# 绘制热图
+pheatmap(assay(vsd)[top50_AD_Young, ],
+         scale = "row",
+         annotation_col = data.frame(Group = sample_info$Group, 
+                                     row.names = rownames(sample_info)),
+         show_rownames = TRUE,
+         show_colnames = TRUE,
+         fontsize_row = 8,
+         fontsize_col = 8,
+         main = "Top 50 DEGs: AD vs Young",
+         cluster_cols = TRUE,
+         cluster_rows = TRUE,
+         color = colorRampPalette(c("navy", "white", "firebrick3"))(50))
+
+# 保存
+ggsave("Heatmap_Top50_AD_vs_Young.png", width = 12, height = 10, dpi = 300)
+
+
+# 6.2 韦恩图 - 展示三组比较的重叠基因
+if (!require("VennDiagram")) install.packages("VennDiagram")
+library(VennDiagram)
+
+venn.plot <- venn.diagram(
+  x = list(
+    AD_vs_Young = rownames(sig_AD_Young),
+    AD_vs_Old = rownames(sig_AD_Old),
+    Old_vs_Young = rownames(sig_Old_Young)
+  ),
+  filename = "Venn_DEGs.png",
+  output = TRUE,
+  imagetype = "png",
+  height = 2000,
+  width = 2000,
+  resolution = 300,
+  col = "transparent",
+  fill = c("cornflowerblue", "green", "yellow"),
+  alpha = 0.50,
+  label.col = c("darkblue", "darkgreen", "orange"),
+  cex = 1.5,
+  fontfamily = "serif",
+  fontface = "bold",
+  cat.col = c("darkblue", "darkgreen", "orange"),
+  cat.cex = 1.5,
+  cat.fontfamily = "serif",
+  cat.fontface = "bold",
+  margin = 0.05
+)
+
+
+
+
+
+
+
+
+
+# ====== 设置感兴趣的基因列表 ======
+genes_of_interest <- c("DRD2", "LYN", "NFE2L2", "CDK2", "NR3C1", "PIK3CA", 
+                       "CTSB", "LCK", "BRAF", "MAPK8", "MMP9", "GSK3B", 
+                       "PIK3CD", "CSF1R", "FYN", "PTGS2", "SMAD3", "NFKB1", 
+                       "MAP2K1", "HDAC1", "KIT", "ABL1", "MAPK14")
+
+# 设置配色方案
+my_colors <- c("#d25756", "#f1cb6e", "#7eb4db", "#b889b9")
+
+# 检查哪些基因在数据中存在
+genes_found <- genes_of_interest[genes_of_interest %in% rownames(count_filtered)]
+genes_missing <- genes_of_interest[!genes_of_interest %in% rownames(count_filtered)]
+
+cat("找到的基因数:", length(genes_found), "\n")
+cat("找到的基因:", paste(genes_found, collapse = ", "), "\n")
+if(length(genes_missing) > 0) {
+  cat("未找到的基因:", paste(genes_missing, collapse = ", "), "\n")
+}
+
+# ====== 1. 提取感兴趣基因的表达数据 ======
+# 获取标准化后的表达值
+vsd_matrix <- assay(vsd)
+gene_expression <- vsd_matrix[genes_found, ]
+
+# ====== 2. 热图展示23个基因的表达模式 ======
+library(pheatmap)
+library(RColorBrewer)
+
+# 创建注释信息
+annotation_col <- data.frame(
+  Group = sample_info$Group,
+  row.names = colnames(gene_expression)
+)
+
+# 设置注释颜色
+ann_colors <- list(
+  Group = c(Young = my_colors[1], Old = my_colors[2], AD = my_colors[3])
+)
+
+# 创建渐变色
+heatmap_colors <- colorRampPalette(c(my_colors[4], "white", my_colors[1]))(100)
+
+# 绘制热图
+pheatmap(gene_expression,
+         scale = "row",
+         annotation_col = annotation_col,
+         annotation_colors = ann_colors,
+         show_rownames = TRUE,
+         show_colnames = TRUE,
+         fontsize_row = 10,
+         fontsize_col = 8,
+         main = "Expression Heatmap of 23 Target Genes",
+         cluster_cols = TRUE,
+         cluster_rows = TRUE,
+         color = heatmap_colors,
+         border_color = NA,
+         cellwidth = 15,
+         cellheight = 12,
+         angle_col = 45)
+
+# ====== 3. 箱线图展示每个基因在三组中的表达 ======
+library(ggplot2)
+library(reshape2)
+
+# 准备数据
+expr_long <- melt(gene_expression)
+colnames(expr_long) <- c("Gene", "Sample", "Expression")
+expr_long$Group <- sample_info[expr_long$Sample, "Group"]
+
+# 绘制分面箱线图
+p_boxplot <- ggplot(expr_long, aes(x = Group, y = Expression, fill = Group)) +
+  geom_boxplot(alpha = 0.8) +
+  geom_jitter(width = 0.2, alpha = 0.5, size = 1) +
+  facet_wrap(~ Gene, scales = "free_y", ncol = 5) +
+  scale_fill_manual(values = c(Young = my_colors[1], 
+                               Old = my_colors[2], 
+                               AD = my_colors[3])) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        strip.text = element_text(size = 10, face = "bold"),
+        legend.position = "top",
+        panel.grid.minor = element_blank()) +
+  labs(title = "Expression of 23 Target Genes across Groups",
+       x = "Group",
+       y = "Normalized Expression (VST)")
+print(p_boxplot)
+
+# ====== 4. 提取这些基因的差异表达结果 ======
+
+# 先运行差异分析（如果还没运行）
+if(!exists("res_AD_vs_Young")) {
+  # 运行DESeq2差异分析
+  dds <- DESeq(dds)
+  res_AD_vs_Young <- results(dds, contrast = c("Group", "AD", "Young"))
+  res_AD_vs_Old <- results(dds, contrast = c("Group", "AD", "Old"))
+  res_Old_vs_Young <- results(dds, contrast = c("Group", "Old", "Young"))
+}
+
+# 创建差异表达结果汇总表
+deg_summary <- data.frame(
+  Gene = genes_found,
+  stringsAsFactors = FALSE
+)
+
+# AD vs Young
+ad_young <- as.data.frame(res_AD_vs_Young[genes_found, ])
+deg_summary$logFC_AD_vs_Young <- ad_young$log2FoldChange
+deg_summary$padj_AD_vs_Young <- ad_young$padj
+deg_summary$sig_AD_vs_Young <- ifelse(ad_young$padj < 0.05, "*", "")
+
+# AD vs Old  
+ad_old <- as.data.frame(res_AD_vs_Old[genes_found, ])
+deg_summary$logFC_AD_vs_Old <- ad_old$log2FoldChange
+deg_summary$padj_AD_vs_Old <- ad_old$padj
+deg_summary$sig_AD_vs_Old <- ifelse(ad_old$padj < 0.05, "*", "")
+
+# Old vs Young
+old_young <- as.data.frame(res_Old_vs_Young[genes_found, ])
+deg_summary$logFC_Old_vs_Young <- old_young$log2FoldChange
+deg_summary$padj_Old_vs_Young <- old_young$padj
+deg_summary$sig_Old_vs_Young <- ifelse(old_young$padj < 0.05, "*", "")
+
+# 保存差异表达汇总
+write.csv(deg_summary, "Target_genes_DEG_summary.csv", row.names = FALSE)
+print(deg_summary)
+
+# ====== 5. 气泡图展示差异表达 ======
+# 准备数据
+bubble_data <- data.frame(
+  Gene = rep(deg_summary$Gene, 3),
+  Comparison = rep(c("AD vs Young", "AD vs Old", "Old vs Young"), each = nrow(deg_summary)),
+  logFC = c(deg_summary$logFC_AD_vs_Young, 
+            deg_summary$logFC_AD_vs_Old, 
+            deg_summary$logFC_Old_vs_Young),
+  padj = c(deg_summary$padj_AD_vs_Young, 
+           deg_summary$padj_AD_vs_Old, 
+           deg_summary$padj_Old_vs_Young)
+)
+
+bubble_data$neg_log_padj <- -log10(bubble_data$padj + 1e-10)
+bubble_data$Significant <- ifelse(bubble_data$padj < 0.05, "Yes", "No")
+
+p_bubble <- ggplot(bubble_data, aes(x = Comparison, y = Gene)) +
+  geom_point(aes(size = neg_log_padj, color = logFC, shape = Significant)) +
+  scale_color_gradient2(low = my_colors[4], mid = "white", high = my_colors[1],
+                        midpoint = 0, name = "log2FC") +
+  scale_size_continuous(range = c(2, 10), name = "-log10(padj)") +
+  scale_shape_manual(values = c("No" = 1, "Yes" = 16)) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 11),
+        axis.text.y = element_text(size = 10),
+        panel.grid.minor = element_blank(),
+        legend.position = "right") +
+  labs(title = "Differential Expression of 23 Target Genes",
+       x = "Comparison",
+       y = "Gene") +
+  coord_fixed(ratio = 0.3)
+print(p_bubble)
+
+# ====== 6. 相关性网络图 ======
+library(corrplot)
+
+# 计算基因间的相关性
+gene_cor <- cor(t(gene_expression), method = "spearman")
+
+# 绘制相关性矩阵
+corrplot(gene_cor, 
+         method = "color",
+         type = "upper",
+         order = "hclust",
+         col = colorRampPalette(c(my_colors[4], "white", my_colors[1]))(100),
+         addCoef.col = "black",
+         number.cex = 0.6,
+         tl.col = "black",
+         tl.srt = 45,
+         tl.cex = 0.8,
+         diag = FALSE,
+         title = "Gene Correlation Matrix (Spearman)",
+         mar = c(0, 0, 2, 0))
+
+# ====== 7. PCA图 - 仅使用23个基因 ======
+if (!require("ggrepel")) install.packages("ggrepel")
+library(ggrepel)
+
+# PCA分析
+pca_genes <- prcomp(t(gene_expression), scale = TRUE)
+pca_data <- data.frame(
+  PC1 = pca_genes$x[,1],
+  PC2 = pca_genes$x[,2],
+  Sample = rownames(pca_genes$x),
+  Group = sample_info[rownames(pca_genes$x), "Group"]
+)
+
+# 计算方差解释率
+var_explained <- round(100 * pca_genes$sdev^2 / sum(pca_genes$sdev^2), 1)
+
+p_pca <- ggplot(pca_data, aes(x = PC1, y = PC2, color = Group)) +
+  geom_point(size = 4, alpha = 0.8) +
+  geom_text_repel(aes(label = Sample), size = 3, max.overlaps = 20) +
+  scale_color_manual(values = c(Young = my_colors[1], 
+                                Old = my_colors[2], 
+                                AD = my_colors[3])) +
+  theme_bw() +
+  theme(legend.position = "top",
+        panel.grid.minor = element_blank()) +
+  labs(title = "PCA based on 23 Target Genes",
+       x = paste0("PC1 (", var_explained[1], "% variance)"),
+       y = paste0("PC2 (", var_explained[2], "% variance)"))
+print(p_pca)
+
+# ====== 8. 基因表达趋势图 ======
+# 计算每组的平均表达
+mean_expr <- aggregate(t(gene_expression), 
+                       by = list(Group = sample_info$Group), 
+                       FUN = mean)
+rownames(mean_expr) <- mean_expr$Group
+mean_expr <- mean_expr[,-1]
+mean_expr <- t(mean_expr)
+
+# 准备数据
+trend_data <- melt(mean_expr)
+colnames(trend_data) <- c("Gene", "Group", "Mean_Expression")
+trend_data$Group <- factor(trend_data$Group, levels = c("Young", "Old", "AD"))
+
+p_trend <- ggplot(trend_data, aes(x = Group, y = Mean_Expression, 
+                                  group = Gene, color = Gene)) +
+  geom_line(size = 1, alpha = 0.7) +
+  geom_point(size = 3) +
+  facet_wrap(~ Gene, scales = "free_y", ncol = 5) +
+  scale_color_manual(values = rep(my_colors, length.out = length(genes_found))) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        strip.text = element_text(size = 9, face = "bold"),
+        legend.position = "none",
+        panel.grid.minor = element_blank()) +
+  labs(title = "Expression Trend of 23 Target Genes",
+       x = "Group",
+       y = "Mean Normalized Expression")
+print(p_trend)
+
+# ====== 9. 单个基因的小提琴图 ======
+# 选择显示表达变化最大的前9个基因
+fc_range <- apply(deg_summary[, grep("logFC", colnames(deg_summary))], 1, 
+                  function(x) max(abs(x), na.rm = TRUE))
+top_genes <- genes_found[order(fc_range, decreasing = TRUE)[1:min(9, length(genes_found))]]
+
+# 准备数据
+violin_data <- expr_long[expr_long$Gene %in% top_genes, ]
+
+p_violin <- ggplot(violin_data, aes(x = Group, y = Expression, fill = Group)) +
+  geom_violin(alpha = 0.7, scale = "width") +
+  geom_boxplot(width = 0.2, alpha = 0.8) +
+  facet_wrap(~ Gene, scales = "free_y", ncol = 3) +
+  scale_fill_manual(values = c(Young = my_colors[1], 
+                               Old = my_colors[2], 
+                               AD = my_colors[3])) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        strip.text = element_text(size = 10, face = "bold"),
+        legend.position = "top",
+        panel.grid.minor = element_blank()) +
+  labs(title = "Top 9 Differentially Expressed Target Genes",
+       x = "Group",
+       y = "Normalized Expression (VST)")
+print(p_violin)
+
+# ====== 输出分析总结 ======
+cat("\n========== 分析完成 ==========\n")
+cat("已生成以下可视化图形（在Plots窗口中）:\n")
+cat("1. 热图 - 23个基因表达模式\n")
+cat("2. 箱线图 - 各基因在三组中的表达分布\n")
+cat("3. 气泡图 - 差异表达结果汇总\n")
+cat("4. 相关性矩阵图\n")
+cat("5. PCA图 - 基于23个基因\n")
+cat("6. 表达趋势图\n")
+cat("7. 小提琴图 - Top差异基因\n")
+cat("\n使用Plots窗口的左右箭头可以切换查看不同图形\n")
+cat("差异表达汇总已保存至: Target_genes_DEG_summary.csv\n")
+
+
+
+
+
+
+
+
+
+# ====== 设置感兴趣的基因列表 ======
+genes_of_interest <- c("DRD2", "LYN", "NFE2L2", "CDK2", "NR3C1", "PIK3CA", 
+                       "CTSB", "LCK", "BRAF", "MAPK8", "MMP9", "GSK3B", 
+                       "PIK3CD", "CSF1R", "FYN", "PTGS2", "SMAD3", "NFKB1", 
+                       "MAP2K1", "HDAC1", "KIT", "ABL1", "MAPK14")
+
+# 设置配色方案
+my_colors <- c("#d25756", "#f1cb6e", "#7eb4db", "#b889b9")
+
+# 检查哪些基因在数据中存在
+genes_found <- genes_of_interest[genes_of_interest %in% rownames(count_filtered)]
+genes_missing <- genes_of_interest[!genes_of_interest %in% rownames(count_filtered)]
+
+cat("找到的基因数:", length(genes_found), "\n")
+cat("找到的基因:", paste(genes_found, collapse = ", "), "\n")
+if(length(genes_missing) > 0) {
+  cat("未找到的基因:", paste(genes_missing, collapse = ", "), "\n")
+}
+
+# ====== 1. 提取感兴趣基因的表达数据 ======
+vsd_matrix <- assay(vsd)
+gene_expression <- vsd_matrix[genes_found, ]
+
+# ====== 2. 先运行差异分析 ======
+if(!exists("res_AD_vs_Young")) {
+  dds <- DESeq(dds)
+  res_AD_vs_Young <- results(dds, contrast = c("Group", "AD", "Young"))
+  res_AD_vs_Old <- results(dds, contrast = c("Group", "AD", "Old"))
+  res_Old_vs_Young <- results(dds, contrast = c("Group", "Old", "Young"))
+}
+
+# 创建差异表达结果汇总表
+deg_summary <- data.frame(
+  Gene = genes_found,
+  stringsAsFactors = FALSE
+)
+
+# AD vs Young
+ad_young <- as.data.frame(res_AD_vs_Young[genes_found, ])
+deg_summary$logFC_AD_vs_Young <- ad_young$log2FoldChange
+deg_summary$padj_AD_vs_Young <- ad_young$padj
+
+# AD vs Old  
+ad_old <- as.data.frame(res_AD_vs_Old[genes_found, ])
+deg_summary$logFC_AD_vs_Old <- ad_old$log2FoldChange
+deg_summary$padj_AD_vs_Old <- ad_old$padj
+
+# Old vs Young
+old_young <- as.data.frame(res_Old_vs_Young[genes_found, ])
+deg_summary$logFC_Old_vs_Young <- old_young$log2FoldChange
+deg_summary$padj_Old_vs_Young <- old_young$padj
+
+# 保存差异表达汇总
+write.csv(deg_summary, "Target_genes_DEG_summary.csv", row.names = FALSE)
+print(deg_summary)
+
+# ====== 3. 热图展示23个基因的表达模式 ======
+library(pheatmap)
+library(RColorBrewer)
+library(ggplot2)
+library(reshape2)
+
+# 创建注释信息
+annotation_col <- data.frame(
+  Group = sample_info$Group,
+  row.names = colnames(gene_expression)
+)
+
+# 设置注释颜色
+ann_colors <- list(
+  Group = c(Young = my_colors[1], Old = my_colors[2], AD = my_colors[3])
+)
+
+# 创建渐变色
+heatmap_colors <- colorRampPalette(c(my_colors[4], "white", my_colors[1]))(100)
+
+# 绘制热图
+pheatmap(gene_expression,
+         scale = "row",
+         annotation_col = annotation_col,
+         annotation_colors = ann_colors,
+         show_rownames = TRUE,
+         show_colnames = TRUE,
+         fontsize_row = 10,
+         fontsize_col = 8,
+         main = "Expression Heatmap of 23 Target Genes",
+         cluster_cols = TRUE,
+         cluster_rows = TRUE,
+         color = heatmap_colors,
+         border_color = NA,
+         cellwidth = 15,
+         cellheight = 12,
+         angle_col = 45)
+
+# ====== 4. 箱线图展示每个基因在三组中的表达（带显著性标记） ======
+if (!require("ggpubr")) install.packages("ggpubr")
+library(ggpubr)
+
+# 准备数据
+expr_long <- melt(gene_expression)
+colnames(expr_long) <- c("Gene", "Sample", "Expression")
+expr_long$Group <- sample_info[expr_long$Sample, "Group"]
+expr_long$Group <- factor(expr_long$Group, levels = c("Young", "Old", "AD"))
+
+# 设置比较组合
+my_comparisons <- list(c("Young", "Old"), c("Young", "AD"), c("Old", "AD"))
+
+# 绘制分面箱线图（带显著性）
+p_boxplot <- ggplot(expr_long, aes(x = Group, y = Expression, fill = Group)) +
+  geom_boxplot(alpha = 0.8, outlier.shape = NA) +
+  geom_jitter(width = 0.2, alpha = 0.5, size = 1) +
+  facet_wrap(~ Gene, scales = "free_y", ncol = 5) +
+  scale_fill_manual(values = c(Young = my_colors[1], 
+                               Old = my_colors[2], 
+                               AD = my_colors[3])) +
+  stat_compare_means(comparisons = my_comparisons, 
+                     method = "wilcox.test",
+                     label = "p.signif",
+                     size = 3,
+                     hide.ns = TRUE) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        strip.text = element_text(size = 10, face = "bold"),
+        legend.position = "top",
+        panel.grid.minor = element_blank()) +
+  labs(title = "Expression of 23 Target Genes across Groups",
+       subtitle = "* p<0.05, ** p<0.01, *** p<0.001, **** p<0.0001",
+       x = "Group",
+       y = "Normalized Expression (VST)")
+print(p_boxplot)
+
+# ====== 5. 气泡图展示差异表达（带显著性标记） ======
+# 准备数据
+bubble_data <- data.frame(
+  Gene = rep(deg_summary$Gene, 3),
+  Comparison = rep(c("AD vs Young", "AD vs Old", "Old vs Young"), each = nrow(deg_summary)),
+  logFC = c(deg_summary$logFC_AD_vs_Young, 
+            deg_summary$logFC_AD_vs_Old, 
+            deg_summary$logFC_Old_vs_Young),
+  padj = c(deg_summary$padj_AD_vs_Young, 
+           deg_summary$padj_AD_vs_Old, 
+           deg_summary$padj_Old_vs_Young)
+)
+
+bubble_data$neg_log_padj <- -log10(bubble_data$padj + 1e-10)
+
+# 设置显著性标记
+bubble_data$Sig_label <- ifelse(bubble_data$padj < 0.0001, "****",
+                                ifelse(bubble_data$padj < 0.001, "***",
+                                       ifelse(bubble_data$padj < 0.01, "**",
+                                              ifelse(bubble_data$padj < 0.05, "*", ""))))
+
+bubble_data$Significant <- ifelse(bubble_data$padj < 0.05, "Yes", "No")
+
+p_bubble <- ggplot(bubble_data, aes(x = Comparison, y = Gene)) +
+  geom_point(aes(size = neg_log_padj, fill = logFC, shape = Significant), 
+             color = "black", stroke = 0.5) +
+  geom_text(aes(label = Sig_label), vjust = 0.5, hjust = -0.3, size = 4, color = "red") +
+  scale_fill_gradient2(low = my_colors[3], mid = "white", high = my_colors[1],
+                       midpoint = 0, name = "log2FC") +
+  scale_size_continuous(range = c(3, 12), name = "-log10(padj)") +
+  scale_shape_manual(values = c("No" = 21, "Yes" = 21)) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 11),
+        axis.text.y = element_text(size = 10),
+        panel.grid.minor = element_blank(),
+        legend.position = "right") +
+  labs(title = "Differential Expression of 23 Target Genes",
+       subtitle = "* p<0.05, ** p<0.01, *** p<0.001, **** p<0.0001",
+       x = "Comparison",
+       y = "Gene") +
+  coord_fixed(ratio = 0.3)
+print(p_bubble)
+
+# ====== 6. 相关性网络图 ======
+library(corrplot)
+
+gene_cor <- cor(t(gene_expression), method = "spearman")
+
+corrplot(gene_cor, 
+         method = "color",
+         type = "upper",
+         order = "hclust",
+         col = colorRampPalette(c(my_colors[4], "white", my_colors[1]))(100),
+         addCoef.col = "black",
+         number.cex = 0.6,
+         tl.col = "black",
+         tl.srt = 45,
+         tl.cex = 0.8,
+         diag = FALSE,
+         title = "Gene Correlation Matrix (Spearman)",
+         mar = c(0, 0, 2, 0))
+
+# ====== 7. PCA图 - 仅使用23个基因 ======
+if (!require("ggrepel")) install.packages("ggrepel")
+library(ggrepel)
+
+pca_genes <- prcomp(t(gene_expression), scale = TRUE)
+pca_data <- data.frame(
+  PC1 = pca_genes$x[,1],
+  PC2 = pca_genes$x[,2],
+  Sample = rownames(pca_genes$x),
+  Group = sample_info[rownames(pca_genes$x), "Group"]
+)
+
+var_explained <- round(100 * pca_genes$sdev^2 / sum(pca_genes$sdev^2), 1)
+
+p_pca <- ggplot(pca_data, aes(x = PC1, y = PC2, color = Group)) +
+  geom_point(size = 4, alpha = 0.8) +
+  geom_text_repel(aes(label = Sample), size = 3, max.overlaps = 20) +
+  scale_color_manual(values = c(Young = my_colors[1], 
+                                Old = my_colors[2], 
+                                AD = my_colors[3])) +
+  stat_ellipse(aes(color = Group), level = 0.95, linetype = 2) +
+  theme_bw() +
+  theme(legend.position = "top",
+        panel.grid.minor = element_blank()) +
+  labs(title = "PCA based on 23 Target Genes",
+       x = paste0("PC1 (", var_explained[1], "% variance)"),
+       y = paste0("PC2 (", var_explained[2], "% variance)"))
+print(p_pca)
+
+# ====== 8. 基因表达趋势图 ======
+mean_expr <- aggregate(t(gene_expression), 
+                       by = list(Group = sample_info$Group), 
+                       FUN = mean)
+rownames(mean_expr) <- mean_expr$Group
+mean_expr <- mean_expr[,-1]
+mean_expr <- t(mean_expr)
+
+trend_data <- melt(mean_expr)
+colnames(trend_data) <- c("Gene", "Group", "Mean_Expression")
+trend_data$Group <- factor(trend_data$Group, levels = c("Young", "Old", "AD"))
+
+p_trend <- ggplot(trend_data, aes(x = Group, y = Mean_Expression, 
+                                  group = Gene, color = Gene)) +
+  geom_line(size = 1, alpha = 0.7) +
+  geom_point(size = 3) +
+  facet_wrap(~ Gene, scales = "free_y", ncol = 5) +
+  scale_color_manual(values = rep(my_colors, length.out = length(genes_found))) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        strip.text = element_text(size = 9, face = "bold"),
+        legend.position = "none",
+        panel.grid.minor = element_blank()) +
+  labs(title = "Expression Trend of 23 Target Genes",
+       x = "Group",
+       y = "Mean Normalized Expression")
+print(p_trend)
+
+# ====== 9. 小提琴图 - Top差异基因（带显著性标记） ======
+fc_range <- apply(deg_summary[, grep("logFC", colnames(deg_summary))], 1, 
+                  function(x) max(abs(x), na.rm = TRUE))
+top_genes <- genes_found[order(fc_range, decreasing = TRUE)[1:min(9, length(genes_found))]]
+
+violin_data <- expr_long[expr_long$Gene %in% top_genes, ]
+
+p_violin <- ggplot(violin_data, aes(x = Group, y = Expression, fill = Group)) +
+  geom_violin(alpha = 0.7, scale = "width") +
+  geom_boxplot(width = 0.2, alpha = 0.8, outlier.shape = NA) +
+  geom_jitter(width = 0.1, alpha = 0.4, size = 1) +
+  facet_wrap(~ Gene, scales = "free_y", ncol = 3) +
+  scale_fill_manual(values = c(Young = my_colors[1], 
+                               Old = my_colors[2], 
+                               AD = my_colors[3])) +
+  stat_compare_means(comparisons = my_comparisons, 
+                     method = "wilcox.test",
+                     label = "p.signif",
+                     size = 3.5,
+                     hide.ns = TRUE) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        strip.text = element_text(size = 10, face = "bold"),
+        legend.position = "top",
+        panel.grid.minor = element_blank()) +
+  labs(title = "Top 9 Differentially Expressed Target Genes",
+       subtitle = "* p<0.05, ** p<0.01, *** p<0.001, **** p<0.0001",
+       x = "Group",
+       y = "Normalized Expression (VST)")
+print(p_violin)
+
+# ====== 10. 差异表达柱状图（带显著性星号） ======
+# 准备logFC数据
+bar_data <- data.frame(
+  Gene = rep(deg_summary$Gene, 3),
+  Comparison = factor(rep(c("AD vs Young", "AD vs Old", "Old vs Young"), 
+                          each = nrow(deg_summary)),
+                      levels = c("AD vs Young", "AD vs Old", "Old vs Young")),
+  logFC = c(deg_summary$logFC_AD_vs_Young, 
+            deg_summary$logFC_AD_vs_Old, 
+            deg_summary$logFC_Old_vs_Young),
+  padj = c(deg_summary$padj_AD_vs_Young, 
+           deg_summary$padj_AD_vs_Old, 
+           deg_summary$padj_Old_vs_Young)
+)
+
+bar_data$Sig_label <- ifelse(bar_data$padj < 0.0001, "****",
+                             ifelse(bar_data$padj < 0.001, "***",
+                                    ifelse(bar_data$padj < 0.01, "**",
+                                           ifelse(bar_data$padj < 0.05, "*", ""))))
+
+bar_data$Direction <- ifelse(bar_data$logFC > 0, "Up", "Down")
+
+p_bar <- ggplot(bar_data, aes(x = Gene, y = logFC, fill = Comparison)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.7) +
+  geom_text(aes(label = Sig_label, 
+                y = ifelse(logFC >= 0, logFC + 0.1, logFC - 0.1)),
+            position = position_dodge(width = 0.8),
+            size = 3, color = "red") +
+  geom_hline(yintercept = 0, linetype = "solid", color = "black") +
+  geom_hline(yintercept = c(-1, 1), linetype = "dashed", color = "grey50") +
+  scale_fill_manual(values = c("AD vs Young" = my_colors[1], 
+                               "AD vs Old" = my_colors[3], 
+                               "Old vs Young" = my_colors[2])) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1, size = 10),
+        legend.position = "top",
+        panel.grid.minor = element_blank()) +
+  labs(title = "Log2 Fold Change of 23 Target Genes",
+       subtitle = "* p<0.05, ** p<0.01, *** p<0.001, **** p<0.0001 | Dashed lines: |log2FC| = 1",
+       x = "Gene",
+       y = "log2 Fold Change")
+print(p_bar)
+
+# ====== 输出分析总结 ======
+cat("\n========== 分析完成 ==========\n")
+cat("已生成以下可视化图形（在Plots窗口中）:\n")
+cat("1. 热图 - 23个基因表达模式\n")
+cat("2. 箱线图 - 各基因表达分布（带显著性星号）\n")
+cat("3. 气泡图 - 差异表达结果（带显著性星号）\n")
+cat("4. 相关性矩阵图\n")
+cat("5. PCA图 - 基于23个基因\n")
+cat("6. 表达趋势图\n")
+cat("7. 小提琴图 - Top差异基因（带显著性星号）\n")
+cat("8. 柱状图 - Log2FC比较（带显著性星号）\n")
+cat("\n显著性标记: * p<0.05, ** p<0.01, *** p<0.001, **** p<0.0001\n")
+cat("差异表达汇总已保存至: Target_genes_DEG_summary.csv\n")
